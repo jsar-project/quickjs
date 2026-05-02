@@ -29,7 +29,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <time.h>
-#if !defined(_MSC_VER)
+#if !defined(_MSC_VER) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <sys/time.h>
 #endif
 #if defined(__APPLE__)
@@ -61,11 +61,11 @@ extern "C" {
 #include <windows.h>
 #include <process.h> // _beginthread
 #endif
-#if !defined(_WIN32) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !defined(__DJGPP)
+#if !defined(_WIN32) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !defined(__DJGPP) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <errno.h>
 #include <pthread.h>
 #endif
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <limits.h>
 #include <unistd.h>
 #endif
@@ -615,7 +615,7 @@ static inline int js_exepath(char* buffer, size_t* size);
 
 /* Cross-platform threading APIs. */
 
-#if defined(EMSCRIPTEN) || defined(__wasi__) || defined(__DJGPP)
+#if defined(EMSCRIPTEN) || defined(__wasi__) || defined(__DJGPP) || defined(RQUICKJS_WASM_FREESTANDING)
 
 #define JS_HAVE_THREADS 0
 
@@ -1588,6 +1588,8 @@ static inline uint64_t js__hrtime_ns(void) {
   if (gettimeofday(&tv, NULL))
     abort();
   return tv.tv_sec * NANOSEC + tv.tv_usec * 1000;
+#elif defined(RQUICKJS_WASM_FREESTANDING)
+  return 0;
 #else
   struct timespec t;
 
@@ -1600,6 +1602,9 @@ static inline uint64_t js__hrtime_ns(void) {
 #endif
 
 static inline int64_t js__gettimeofday_us(void) {
+#ifdef RQUICKJS_WASM_FREESTANDING
+    return 0;
+#else
     struct timeval tv;
 #ifdef _WIN32
     gettimeofday_msvc(&tv);
@@ -1607,6 +1612,7 @@ static inline int64_t js__gettimeofday_us(void) {
     gettimeofday(&tv, NULL);
 #endif
     return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+#endif
 }
 
 #if defined(_WIN32)

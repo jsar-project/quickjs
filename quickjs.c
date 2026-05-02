@@ -30,7 +30,8 @@
 #include <inttypes.h>
 #include <string.h>
 #include <assert.h>
-#if !defined(_MSC_VER)
+#include <limits.h>
+#if !defined(_MSC_VER) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <sys/time.h>
 #if defined(_WIN32)
 #include <timezoneapi.h>
@@ -72,7 +73,7 @@
 // atomic_store etc. are completely busted in recent versions of tcc;
 // somehow the compiler forgets to load |ptr| into %rdi when calling
 // the __atomic_*() helpers in its lib/stdatomic.c and lib/atomic.S
-#if !defined(__TINYC__) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !__STDC_NO_ATOMICS__ && !defined(__DJGPP)
+#if !defined(__TINYC__) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !defined(RQUICKJS_WASM_FREESTANDING) && !__STDC_NO_ATOMICS__ && !defined(__DJGPP)
 #include "quickjs-c-atomics.h"
 #define CONFIG_ATOMICS
 #endif
@@ -1989,7 +1990,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     rt->js_class_id_alloc = JS_CLASS_INIT_COUNT;
 
     rt->stack_size = JS_DEFAULT_STACK_SIZE;
-#ifdef __wasi__
+#if defined(__wasi__) || defined(RQUICKJS_WASM_FREESTANDING)
     rt->stack_size = 0;
 #endif
 
@@ -2725,7 +2726,7 @@ JSRuntime *JS_GetRuntime(JSContext *ctx)
 
 static void update_stack_limit(JSRuntime *rt)
 {
-#if defined(__wasi__)
+#if defined(__wasi__) || defined(RQUICKJS_WASM_FREESTANDING)
     rt->stack_limit = 0; /* no limit */
 #else
     if (rt->stack_size == 0) {
