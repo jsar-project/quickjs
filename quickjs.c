@@ -7723,6 +7723,30 @@ static bool can_add_backtrace(JSValueConst obj)
 #define JS_BACKTRACE_FLAG_SINGLE_LEVEL     (1 << 1)
 #define JS_BACKTRACE_FLAG_FILTER_FUNC      (1 << 2)
 
+static void dbuf_put_int32_dec(DynBuf *dbuf, int value)
+{
+    char buf[16];
+    uint32_t n;
+    size_t pos = sizeof(buf);
+
+    n = value < 0 ? -(uint32_t)value : (uint32_t)value;
+    do {
+        buf[--pos] = '0' + (n % 10);
+        n /= 10;
+    } while (n != 0);
+    if (value < 0)
+        buf[--pos] = '-';
+    dbuf_put(dbuf, (const uint8_t *)(buf + pos), sizeof(buf) - pos);
+}
+
+static void dbuf_put_source_pos(DynBuf *dbuf, int line_num, int col_num)
+{
+    dbuf_putc(dbuf, ':');
+    dbuf_put_int32_dec(dbuf, line_num);
+    dbuf_putc(dbuf, ':');
+    dbuf_put_int32_dec(dbuf, col_num);
+}
+
 /* if filename != NULL, an additional level is added with the filename
    and line number information (used for parse error). */
 static void build_backtrace(JSContext *ctx, JSValueConst error_val,
@@ -7789,9 +7813,10 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
             goto done;
         if (filename) {
             i++;
-            dbuf_printf(&dbuf, "    at %s", filename);
+            dbuf_putstr(&dbuf, "    at ");
+            dbuf_putstr(&dbuf, filename);
             if (line_num != -1)
-                dbuf_printf(&dbuf, ":%d:%d", line_num, col_num);
+                dbuf_put_source_pos(&dbuf, line_num, col_num);
             dbuf_putc(&dbuf, '\n');
         }
     }
@@ -7836,7 +7861,8 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
                 str1 = "<anonymous>";
             else
                 str1 = func_name_str;
-            dbuf_printf(&dbuf, "    at %s", str1);
+            dbuf_putstr(&dbuf, "    at ");
+            dbuf_putstr(&dbuf, str1);
             JS_FreeCString(ctx, func_name_str);
 
             if (b && sf->cur_pc) {
@@ -7847,10 +7873,11 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
                 pc = sf->cur_pc - b->byte_code_buf - 1;
                 line_num1 = find_line_num(ctx, b, pc, &col_num1);
                 atom_str = b->filename ? JS_AtomToCString(ctx, b->filename) : NULL;
-                dbuf_printf(&dbuf, " (%s", atom_str ? atom_str : "<null>");
+                dbuf_putstr(&dbuf, " (");
+                dbuf_putstr(&dbuf, atom_str ? atom_str : "<null>");
                 JS_FreeCString(ctx, atom_str);
                 if (line_num1 != -1)
-                    dbuf_printf(&dbuf, ":%d:%d", line_num1, col_num1);
+                    dbuf_put_source_pos(&dbuf, line_num1, col_num1);
                 dbuf_putc(&dbuf, ')');
             } else if (b) {
                 // FIXME(bnoordhuis) Missing `sf->cur_pc = pc` in bytecode
