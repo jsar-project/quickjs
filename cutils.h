@@ -45,6 +45,11 @@
 extern "C" {
 #endif
 
+#ifdef RQUICKJS_WASM_FREESTANDING
+int64_t rquickjs_browser_date_now_us(void);
+uint64_t rquickjs_browser_hrtime_ns(void);
+#endif
+
 #if defined(_MSC_VER)
 #include <malloc.h>
 #define alloca _alloca
@@ -1589,7 +1594,7 @@ static inline uint64_t js__hrtime_ns(void) {
     abort();
   return tv.tv_sec * NANOSEC + tv.tv_usec * 1000;
 #elif defined(RQUICKJS_WASM_FREESTANDING)
-  return 0;
+  return rquickjs_browser_hrtime_ns();
 #else
   struct timespec t;
 
@@ -1603,7 +1608,7 @@ static inline uint64_t js__hrtime_ns(void) {
 
 static inline int64_t js__gettimeofday_us(void) {
 #ifdef RQUICKJS_WASM_FREESTANDING
-    return 0;
+    return rquickjs_browser_date_now_us();
 #else
     struct timeval tv;
 #ifdef _WIN32
