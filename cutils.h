@@ -29,7 +29,9 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <time.h>
-#if !defined(_MSC_VER) && !defined(RQUICKJS_WASM_FREESTANDING)
+#if defined(__ZEPHYR__)
+#include <zephyr/posix/sys/time.h>
+#elif !defined(_MSC_VER) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <sys/time.h>
 #endif
 #if defined(__APPLE__)
@@ -66,7 +68,10 @@ uint64_t rquickjs_browser_hrtime_ns(void);
 #include <windows.h>
 #include <process.h> // _beginthread
 #endif
-#if !defined(_WIN32) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !defined(__DJGPP) && !defined(RQUICKJS_WASM_FREESTANDING)
+#if defined(__ZEPHYR__)
+#include <errno.h>
+#include <zephyr/posix/pthread.h>
+#elif !defined(_WIN32) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !defined(__DJGPP) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <errno.h>
 #include <pthread.h>
 #endif
@@ -87,10 +92,16 @@ uint64_t rquickjs_browser_hrtime_ns(void);
 #  define __attribute__(x)
 #  define __attribute(x)
 #else
-#  define likely(x)       __builtin_expect(!!(x), 1)
-#  define unlikely(x)     __builtin_expect(!!(x), 0)
+#  ifndef likely
+#    define likely(x)       __builtin_expect(!!(x), 1)
+#  endif
+#  ifndef unlikely
+#    define unlikely(x)     __builtin_expect(!!(x), 0)
+#  endif
 #  define no_inline __attribute__((noinline))
-#  define __maybe_unused __attribute__((unused))
+#  ifndef __maybe_unused
+#    define __maybe_unused __attribute__((unused))
+#  endif
 #endif
 
 #ifndef offsetof
@@ -628,7 +639,13 @@ static inline int js_exepath(char* buffer, size_t* size);
 
 #define JS_HAVE_THREADS 1
 
-#if defined(_WIN32)
+#if defined(__ZEPHYR__)
+#define JS_ONCE_INIT ATOMIC_INIT(0)
+typedef atomic_t js_once_t;
+typedef struct k_mutex js_mutex_t;
+typedef struct k_condvar js_cond_t;
+typedef pthread_t js_thread_t;
+#elif defined(_WIN32)
 #define JS_ONCE_INIT INIT_ONCE_STATIC_INIT
 typedef INIT_ONCE js_once_t;
 typedef CRITICAL_SECTION js_mutex_t;
@@ -1726,7 +1743,100 @@ static inline int js_exepath(char* buffer, size_t* size_ptr) {
 /*--- Cross-platform threading APIs. ----*/
 
 #if JS_HAVE_THREADS
-#if defined(_WIN32)
+#if defined(__ZEPHYR__)
+
+static inline void js_once(js_once_t *guard, void (*callback)(void)) {
+    if (atomic_cas(guard, 0, 1)) {
+        callback();
+        atomic_set(guard, 2);
+    } else {
+        while (atomic_get(guard) != 2)
+            k_yield();
+    }
+}
+
+static inline void js_mutex_init(js_mutex_t *mutex) {
+    if (k_mutex_init(mutex))
+        abort();
+}
+
+static inline void js_mutex_destroy(js_mutex_t *mutex) {
+    (void)mutex;
+}
+
+static inline void js_mutex_lock(js_mutex_t *mutex) {
+    if (k_mutex_lock(mutex, K_FOREVER))
+        abort();
+}
+
+static inline void js_mutex_unlock(js_mutex_t *mutex) {
+    if (k_mutex_unlock(mutex))
+        abort();
+}
+
+static inline void js_cond_init(js_cond_t *cond) {
+    if (k_condvar_init(cond))
+        abort();
+}
+
+static inline void js_cond_destroy(js_cond_t *cond) {
+    (void)cond;
+}
+
+static inline void js_cond_signal(js_cond_t *cond) {
+    if (k_condvar_signal(cond))
+        abort();
+}
+
+static inline void js_cond_broadcast(js_cond_t *cond) {
+    if (k_condvar_broadcast(cond) < 0)
+        abort();
+}
+
+static inline void js_cond_wait(js_cond_t *cond, js_mutex_t *mutex) {
+    if (k_condvar_wait(cond, mutex, K_FOREVER))
+        abort();
+}
+
+static inline int js_cond_timedwait(js_cond_t *cond, js_mutex_t *mutex,
+                                    uint64_t timeout) {
+    int ret = k_condvar_wait(cond, mutex, K_NSEC(timeout));
+    if (ret == 0)
+        return 0;
+    if (ret == -EAGAIN) {
+        if (k_mutex_lock(mutex, K_FOREVER))
+            abort();
+        return -1;
+    }
+    abort();
+}
+
+static inline int js_thread_create(js_thread_t *thrd, void (*start)(void *), void *arg,
+                                   int flags) {
+    union {
+        void (*x)(void *);
+        void *(*f)(void *);
+    } u = {start};
+    pthread_attr_t attr;
+    int ret = -1;
+
+    if (flags & ~JS_THREAD_CREATE_DETACHED || pthread_attr_init(&attr))
+        return -1;
+    if ((flags & JS_THREAD_CREATE_DETACHED) &&
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
+        goto fail;
+    if (!pthread_create(thrd, &attr, u.f, arg))
+        ret = 0;
+fail:
+    pthread_attr_destroy(&attr);
+    return ret;
+}
+
+static inline int js_thread_join(js_thread_t thrd) {
+    return pthread_join(thrd, NULL) ? -1 : 0;
+}
+
+#elif defined(_WIN32)
 typedef void (*js__once_cb)(void);
 
 typedef struct {

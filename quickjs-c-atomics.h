@@ -22,14 +22,71 @@
  * THE SOFTWARE.
  */
 
-#if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+#if defined(__ZEPHYR__)
+#include <zephyr/spinlock.h>
+
+/* Cortex-M does not provide lock-free 64-bit atomics and the Zephyr SDK does
+ * not ship libatomic. Serialize all SharedArrayBuffer operations with one
+ * kernel spin lock so the complete Atomics API remains available. */
+static struct k_spinlock js_atomic_lock;
+
+#define _Atomic
+#define JS_ATOMIC_UPDATE(obj, arg, expression)                            \
+    __extension__ ({                                                      \
+        __auto_type js_obj = (obj);                                       \
+        __typeof__(*js_obj) js_arg = (arg);                               \
+        k_spinlock_key_t js_key = k_spin_lock(&js_atomic_lock);           \
+        __typeof__(*js_obj) js_old = *js_obj;                             \
+        *js_obj = (expression);                                           \
+        k_spin_unlock(&js_atomic_lock, js_key);                           \
+        js_old;                                                           \
+    })
+#define atomic_fetch_add(obj, arg) JS_ATOMIC_UPDATE(obj, arg, js_old + js_arg)
+#define atomic_fetch_or(obj, arg) JS_ATOMIC_UPDATE(obj, arg, js_old | js_arg)
+#define atomic_fetch_xor(obj, arg) JS_ATOMIC_UPDATE(obj, arg, js_old ^ js_arg)
+#define atomic_fetch_and(obj, arg) JS_ATOMIC_UPDATE(obj, arg, js_old & js_arg)
+#define atomic_fetch_sub(obj, arg) JS_ATOMIC_UPDATE(obj, arg, js_old - js_arg)
+#define atomic_exchange(obj, arg) JS_ATOMIC_UPDATE(obj, arg, js_arg)
+#define atomic_load(obj)                                                   \
+    __extension__ ({                                                       \
+        __auto_type js_obj = (obj);                                        \
+        k_spinlock_key_t js_key = k_spin_lock(&js_atomic_lock);            \
+        __typeof__(*js_obj) js_value = *js_obj;                            \
+        k_spin_unlock(&js_atomic_lock, js_key);                            \
+        js_value;                                                          \
+    })
+#define atomic_store(obj, desired)                                         \
+    do {                                                                   \
+        __auto_type js_obj = (obj);                                        \
+        k_spinlock_key_t js_key = k_spin_lock(&js_atomic_lock);            \
+        *js_obj = (desired);                                               \
+        k_spin_unlock(&js_atomic_lock, js_key);                            \
+    } while (0)
+#define atomic_compare_exchange_strong(obj, expected, desired)             \
+    __extension__ ({                                                       \
+        __auto_type js_obj = (obj);                                        \
+        __auto_type js_expected = (expected);                              \
+        bool js_success;                                                   \
+        k_spinlock_key_t js_key = k_spin_lock(&js_atomic_lock);            \
+        if (*js_obj == *js_expected) {                                     \
+            *js_obj = (desired);                                           \
+            js_success = true;                                             \
+        } else {                                                           \
+            *js_expected = *js_obj;                                        \
+            js_success = false;                                            \
+        }                                                                  \
+        k_spin_unlock(&js_atomic_lock, js_key);                            \
+        js_success;                                                        \
+    })
+
+#elif (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
    // Use GCC builtins for version < 4.9
 #  if((__GNUC__ << 16) + __GNUC_MINOR__ < ((4) << 16) + 9)
 #    define GCC_BUILTIN_ATOMICS
 #  endif
 #endif
 
-#ifdef GCC_BUILTIN_ATOMICS
+#if !defined(__ZEPHYR__) && defined(GCC_BUILTIN_ATOMICS)
 #define atomic_fetch_add(obj, arg) \
     __atomic_fetch_add(obj, arg, __ATOMIC_SEQ_CST)
 #define atomic_compare_exchange_strong(obj, expected, desired) \
@@ -49,6 +106,6 @@
 #define atomic_fetch_sub(obj, arg) \
     __atomic_fetch_sub(obj, arg, __ATOMIC_SEQ_CST)
 #define _Atomic
-#else
+#elif !defined(__ZEPHYR__)
 #include <stdatomic.h>
 #endif

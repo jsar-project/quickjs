@@ -12,6 +12,12 @@ This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard an
 Head over to the [project website] for instructions on how to get started and more
 documentation.
 
+## Zephyr
+
+QuickJS can use Zephyr's libc and native synchronization primitives, including 64-bit Atomics on
+targets without lock-free 64-bit instructions. The [Zephyr example](examples/zephyr/README.md)
+builds and runs the engine directly on the `mps2/an385` QEMU board.
+
 ## Authors
 
 [@bnoordhuis], [@saghul], and many more [contributors].
