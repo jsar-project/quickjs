@@ -91,6 +91,16 @@ if host_system == 'windows'
   stack_size = 8 * 1024 * 1024
   if cc.get_argument_syntax() == 'msvc'
     add_project_link_arguments(f'/STACK:@stack_size@', language: 'c')
+    if cc.get_id() == 'clang-cl' and get_option('b_sanitize').contains('address')
+      clang_rt_arch = host_machine.cpu_family() == 'x86' ? 'i386' : host_machine.cpu_family()
+      add_project_link_arguments(
+        f'clang_rt.asan_dynamic-@clang_rt_arch@.lib',
+        '/include:__asan_seh_interceptor',
+        f'/wholearchive:clang_rt.asan_dynamic_runtime_thunk-@clang_rt_arch@.lib',
+        '/incremental:no',
+        language: 'c',
+      )
+    endif
   else
     add_project_link_arguments(f'-Wl,--stack,@stack_size@', language: 'c')
   endif

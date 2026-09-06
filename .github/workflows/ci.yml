@@ -722,7 +722,6 @@ jobs:
               "-Db_sanitize=address,undefined"
               "-Db_lundef=false"
               "-Db_vscrt=md"
-              "-Dc_link_args=['clang_rt.asan_dynamic-x86_64.lib','/include:__asan_seh_interceptor','/wholearchive:clang_rt.asan_dynamic_runtime_thunk-x86_64.lib','/incremental:no']"
             extra_envs:
               CC: clang-cl
               CXX: clang-cl
