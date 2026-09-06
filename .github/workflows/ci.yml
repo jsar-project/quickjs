@@ -825,11 +825,12 @@ jobs:
           $clangResourceDir = (& clang-cl --print-resource-dir).Trim()
           $clangRuntimeDir = Join-Path $clangResourceDir "lib\windows"
           $asanRuntime = Join-Path $clangRuntimeDir "clang_rt.asan_dynamic-x86_64.lib"
-          if (!(Test-Path $asanRuntime)) {
-            throw "Clang ASan runtime not found: $asanRuntime"
+          $asanThunk = Join-Path $clangRuntimeDir "clang_rt.asan_dynamic_runtime_thunk-x86_64.lib"
+          if (!(Test-Path $asanRuntime) -or !(Test-Path $asanThunk)) {
+            throw "Clang ASan runtime libraries not found in: $clangRuntimeDir"
           }
           "LIB=$clangRuntimeDir;$env:LIB" >> $env:GITHUB_ENV
-          "LDFLAGS=`"$asanRuntime`"" >> $env:GITHUB_ENV
+          "LDFLAGS=clang_rt.asan_dynamic-x86_64.lib /include:__asan_seh_interceptor /wholearchive:clang_rt.asan_dynamic_runtime_thunk-x86_64.lib /incremental:no" >> $env:GITHUB_ENV
           $clangRuntimeDir >> $env:GITHUB_PATH
       - name: Activate MSVC and Configure
         if: ${{ matrix.platform == 'windows-latest' }}
