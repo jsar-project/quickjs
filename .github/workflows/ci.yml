@@ -725,6 +725,7 @@ jobs:
             extra_envs:
               CC: clang-cl
               CXX: clang-cl
+              ASAN_OPTIONS: report_globals=0:halt_on_error=1:abort_on_error=1:print_summary=1
         platform:
           - ubuntu-latest
           - windows-latest
