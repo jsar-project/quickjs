@@ -722,6 +722,7 @@ jobs:
               "-Db_sanitize=address,undefined"
               "-Db_lundef=false"
               "-Db_vscrt=md"
+              "-Dc_link_args=clang_rt.asan_dynamic-x86_64.lib,/include:__asan_seh_interceptor,/wholearchive:clang_rt.asan_dynamic_runtime_thunk-x86_64.lib,/incremental:no"
             extra_envs:
               CC: clang-cl
               CXX: clang-cl
@@ -830,7 +831,6 @@ jobs:
             throw "Clang ASan runtime libraries not found in: $clangRuntimeDir"
           }
           "LIB=$clangRuntimeDir;$env:LIB" >> $env:GITHUB_ENV
-          "LDFLAGS=clang_rt.asan_dynamic-x86_64.lib /include:__asan_seh_interceptor /wholearchive:clang_rt.asan_dynamic_runtime_thunk-x86_64.lib /incremental:no" >> $env:GITHUB_ENV
           $clangRuntimeDir >> $env:GITHUB_PATH
       - name: Activate MSVC and Configure
         if: ${{ matrix.platform == 'windows-latest' }}
