@@ -91,8 +91,8 @@ int main(void)
     }
     JS_FreeValue(context, value);
 
+    printk("QuickJS Zephyr returned %ld\n", (long)result);
     if (result != 42) {
-        printk("QuickJS Zephyr returned %ld\n", (long)result);
         goto fail;
     }
 
