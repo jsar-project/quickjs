@@ -31,7 +31,9 @@
 #include <string.h>
 #include <assert.h>
 #include <limits.h>
-#if !defined(_MSC_VER) && !defined(RQUICKJS_WASM_FREESTANDING)
+#if defined(__ZEPHYR__)
+#include <zephyr/posix/sys/time.h>
+#elif !defined(_MSC_VER) && !defined(RQUICKJS_WASM_FREESTANDING)
 #include <sys/time.h>
 #if defined(_WIN32)
 #include <timezoneapi.h>
@@ -90,6 +92,12 @@
 
 #define check_dump_flag(rt, flag)  ((rt->dump_flags & (flag +0)) == (flag +0))
 
+#ifdef STRINGIFY
+#undef STRINGIFY
+#endif
+#ifdef STRINGIFY_
+#undef STRINGIFY_
+#endif
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x)  STRINGIFY_(x)
 
@@ -7635,7 +7643,8 @@ static int find_line_num(JSContext *ctx, JSFunctionBytecode *b,
                          uint32_t pc_value, int *col)
 {
     const uint8_t *p_end, *p;
-    int new_line_num, new_col_num, line_num, col_num, pc, v, ret;
+    int new_line_num, new_col_num, line_num, col_num, pc, ret;
+    int32_t v;
     unsigned int op;
 
     *col = 1;
@@ -44685,7 +44694,8 @@ static JSValue js_parseInt(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     const char *str, *p;
-    int radix, flags;
+    int32_t radix;
+    int flags;
     JSValue ret;
 
     str = JS_ToCString(ctx, argv[0]);
@@ -53323,7 +53333,7 @@ static __exception int remainingElementsCount_add(JSContext *ctx,
                                                   int addend)
 {
     JSValue val;
-    int remainingElementsCount;
+    int32_t remainingElementsCount;
 
     val = JS_GetPropertyUint32(ctx, resolve_element_env, 0);
     if (JS_IsException(val))
@@ -53354,7 +53364,8 @@ static JSValue js_promise_all_resolve_element(JSContext *ctx,
     JSValueConst resolve = func_data[3];
     JSValueConst resolve_element_env = func_data[4];
     JSValue ret, obj;
-    int is_zero, index;
+    int is_zero;
+    int32_t index;
 
     if (JS_ToInt32(ctx, &index, func_data[1]))
         return JS_EXCEPTION;
@@ -59738,9 +59749,9 @@ static JSValue js_atomics_wait(JSContext *ctx,
        'ptr' value */
     js_mutex_lock(&js_atomics_mutex);
     if (size_log2 == 3) {
-        res = *(int64_t *)ptr != v;
+        res = atomic_load((_Atomic int64_t *)ptr) != v;
     } else {
-        res = *(int32_t *)ptr != v;
+        res = atomic_load((_Atomic int32_t *)ptr) != v;
     }
     if (res) {
         js_mutex_unlock(&js_atomics_mutex);
@@ -59776,7 +59787,7 @@ static JSValue js_atomics_notify(JSContext *ctx,
 {
     struct list_head *el, *el1, waiter_list;
     int size_log2;
-    int32_t count, n;
+    int count, n;
     void *ptr;
     uint64_t idx;
     JSObject *p;
