@@ -382,6 +382,91 @@ static void module_serde(void)
     JS_FreeRuntime(rt);
 }
 
+static int typed_requests, plain_requests;
+
+static char *attribute_normalize(JSContext *ctx, const char *base,
+                                 const char *name, JSValueConst attrs, void *opaque)
+{
+    JSValue type = JS_IsUndefined(attrs) ? JS_UNDEFINED : JS_GetPropertyStr(ctx, attrs, "type");
+    const char *resolved;
+    if (JS_IsUndefined(type)) {
+        plain_requests++;
+        resolved = "plain";
+    } else {
+        typed_requests++;
+        resolved = "typed";
+    }
+    JS_FreeValue(ctx, type);
+    return js_strdup(ctx, resolved);
+}
+
+static JSModuleDef *attribute_loader(JSContext *ctx, const char *name, void *opaque,
+                                     JSValueConst attrs)
+{
+    JSValue type = JS_IsUndefined(attrs) ? JS_UNDEFINED : JS_GetPropertyStr(ctx, attrs, "type");
+    if (!JS_IsUndefined(type)) {
+        const char *value = JS_ToCString(ctx, type);
+        if (!value) {
+            JS_FreeValue(ctx, type);
+            return NULL;
+        }
+        bool invalid = !strcmp(value, "unsupported");
+        JS_FreeCString(ctx, value);
+        if (invalid) {
+            JS_FreeValue(ctx, type);
+            JS_ThrowTypeError(ctx, "unsupported module type");
+            return NULL;
+        }
+    }
+    JS_FreeValue(ctx, type);
+    const char *code = "export default 1;";
+    JSValue value = JS_Eval(ctx, code, strlen(code), name,
+                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    assert(!JS_IsException(value));
+    JSModuleDef *module = JS_VALUE_GET_PTR(value);
+    JS_FreeValue(ctx, value);
+    return module;
+}
+
+static void distinct_import_requests(void)
+{
+    for (int order = 0; order < 2; order++) {
+        JSRuntime *rt = JS_NewRuntime();
+        JS_SetModuleLoaderFunc2(rt, NULL, attribute_loader, NULL, NULL);
+        JS_SetModuleNormalizeFunc2(rt, attribute_normalize);
+        JSContext *ctx = JS_NewContext(rt);
+        const char *code = order == 0
+            ? "import a from 'asset' with {type:'image'}; import b from 'asset';"
+            : "import a from 'asset'; import b from 'asset' with {type:'image'};";
+        typed_requests = plain_requests = 0;
+        JSValue mod = JS_Eval(ctx, code, strlen(code), "entry",
+                              JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        assert(!JS_IsException(mod));
+        assert(typed_requests == 1 && plain_requests == 1);
+        JS_FreeValue(ctx, mod);
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+    }
+
+    /* A legacy normalizer cannot key modules by attributes. Keep its existing
+       resolution behavior, including rejection of unsupported types. */
+    for (int null_normalizer = 0; null_normalizer < 2; null_normalizer++) {
+        JSRuntime *rt = JS_NewRuntime();
+        JS_SetModuleLoaderFunc2(rt, NULL, attribute_loader, NULL, NULL);
+        if (null_normalizer)
+            JS_SetModuleNormalizeFunc2(rt, NULL);
+        JSContext *ctx = JS_NewContext(rt);
+        const char *code = "import a from 'asset'; import b from 'asset' with {type:'unsupported'};";
+        JSValue mod = JS_Eval(ctx, code, strlen(code), "entry",
+                              JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        assert(JS_IsException(mod));
+        JSValue error = JS_GetException(ctx);
+        JS_FreeValue(ctx, error);
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+    }
+}
+
 static void runtime_cstring_free(void)
 {
     JSRuntime *rt = JS_NewRuntime();
@@ -1027,6 +1112,7 @@ int main(void)
     raw_context_global_var();
     is_array();
     module_serde();
+    distinct_import_requests();
     runtime_cstring_free();
     utf16_string();
     weak_map_gc_check();

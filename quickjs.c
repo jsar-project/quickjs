@@ -29120,11 +29120,14 @@ static int add_req_module_entry(JSContext *ctx, JSModuleDef *m,
     JSReqModuleEntry *rme;
     int i;
 
-    /* no need to add the module request if it is already present */
-    for(i = 0; i < m->req_module_entries_count; i++) {
-        rme = &m->req_module_entries[i];
-        if (rme->module_name == module_name)
-            return i;
+    /* Attribute-aware hosts must resolve each request with its own attributes.
+       Legacy normalizers cannot distinguish them, so retain their behavior. */
+    if (!ctx->rt->module_normalize_has_attr || !ctx->rt->normalize_u.module_normalize_func2) {
+        for(i = 0; i < m->req_module_entries_count; i++) {
+            rme = &m->req_module_entries[i];
+            if (rme->module_name == module_name)
+                return i;
+        }
     }
 
     if (js_resize_array(ctx, (void **)&m->req_module_entries,
@@ -29136,7 +29139,7 @@ static int add_req_module_entry(JSContext *ctx, JSModuleDef *m,
     rme->module_name = JS_DupAtom(ctx, module_name);
     rme->module = NULL;
     rme->attributes = JS_UNDEFINED;
-    return i;
+    return m->req_module_entries_count - 1;
 }
 
 #endif // QJS_DISABLE_PARSER
