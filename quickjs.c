@@ -29130,7 +29130,7 @@ static int add_req_module_entry(JSContext *ctx, JSModuleDef *m,
     rme->module_name = JS_DupAtom(ctx, module_name);
     rme->module = NULL;
     rme->attributes = JS_UNDEFINED;
-    return i;
+    return m->req_module_entries_count - 1;
 }
 
 #endif // QJS_DISABLE_PARSER
