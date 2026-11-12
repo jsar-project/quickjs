@@ -29118,14 +29118,8 @@ static int add_req_module_entry(JSContext *ctx, JSModuleDef *m,
                                 JSAtom module_name)
 {
     JSReqModuleEntry *rme;
-    int i;
-
-    /* no need to add the module request if it is already present */
-    for(i = 0; i < m->req_module_entries_count; i++) {
-        rme = &m->req_module_entries[i];
-        if (rme->module_name == module_name)
-            return i;
-    }
+    /* Requests with the same specifier may have different import attributes.
+       Keep each request until the host resolves its complete module identity. */
 
     if (js_resize_array(ctx, (void **)&m->req_module_entries,
                         sizeof(JSReqModuleEntry),
@@ -30981,9 +30975,7 @@ static JSValue js_evaluate_module(JSContext *ctx, JSModuleDef *m)
 
 /* Parse 'with { key: "value", ... }' clause for import attributes.
    rme->attributes is set to JS_UNDEFINED if no 'with' clause or an object
-   containing the attributes as key/value pairs. If rme->attributes is already
-   set (from a previous import of the same module), we still parse the tokens
-   but skip adding to the object since they should be the same. */
+   containing the attributes as key/value pairs. */
 static __exception int js_parse_with_clause(JSParseState *s, JSReqModuleEntry *rme)
 {
     JSContext *ctx = s->ctx;
