@@ -273,6 +273,10 @@ typedef struct JSValueLink {
     JSValueConst value;
 } JSValueLink;
 
+typedef struct JSJobContextToken {
+    uint64_t high, low;
+} JSJobContextToken;
+
 struct JSRuntime {
     JSMallocFunctions mf;
     JSMallocState malloc_state;
@@ -329,6 +333,7 @@ struct JSRuntime {
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
 
+    JSJobContextToken job_context_token;
     struct list_head job_list; /* list of JSJobEntry.link */
 
     bool module_normalize_has_attr;
@@ -990,6 +995,7 @@ typedef struct JSJobEntry {
     struct list_head link;
     JSContext *ctx;
     JSJobFunc *job_func;
+    JSJobContextToken token;
     int argc;
     JSValue argv[];
 } JSJobEntry;
@@ -2121,8 +2127,8 @@ void JS_SetSharedArrayBufferFunctions(JSRuntime *rt,
 }
 
 /* return 0 if OK, < 0 if exception */
-int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
-                  int argc, JSValueConst *argv)
+static int enqueue_job(JSContext *ctx, JSJobFunc *job_func, int argc,
+                       JSValueConst *argv, JSJobContextToken token)
 {
     JSRuntime *rt = ctx->rt;
     JSJobEntry *e;
@@ -2135,12 +2141,29 @@ int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
         return -1;
     e->ctx = ctx;
     e->job_func = job_func;
+    e->token = token;
     e->argc = argc;
     for(i = 0; i < argc; i++) {
         e->argv[i] = js_dup(argv[i]);
     }
     list_add_tail(&e->link, &rt->job_list);
     return 0;
+}
+
+int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func, int argc, JSValueConst *argv)
+{
+    return enqueue_job(ctx, job_func, argc, argv, ctx->rt->job_context_token);
+}
+
+void JS_SetJobContextToken(JSRuntime *rt, uint64_t high, uint64_t low)
+{
+    rt->job_context_token = (JSJobContextToken){ high, low };
+}
+
+void JS_GetJobContextToken(JSRuntime *rt, uint64_t *high, uint64_t *low)
+{
+    *high = rt->job_context_token.high;
+    *low = rt->job_context_token.low;
 }
 
 bool JS_IsJobPending(JSRuntime *rt)
@@ -2174,7 +2197,10 @@ int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx)
     e = list_entry(rt->job_list.next, JSJobEntry, link);
     list_del(&e->link);
     ctx = e->ctx;
-    res = e->job_func(e->ctx, e->argc, vc(e->argv));
+    JSJobContextToken previous = rt->job_context_token;
+    rt->job_context_token = e->token;
+    res = e->job_func(ctx, e->argc, vc(e->argv));
+    rt->job_context_token = previous;
     for(i = 0; i < e->argc; i++)
         JS_FreeValue(ctx, e->argv[i]);
     if (JS_IsException(res))
@@ -52742,6 +52768,7 @@ typedef struct JSPromiseReactionData {
     struct list_head link; /* not used in promise_reaction_job */
     JSValue resolving_funcs[2];
     JSValue handler;
+    JSJobContextToken token;
 } JSPromiseReactionData;
 
 JSPromiseStateEnum JS_PromiseState(JSContext *ctx, JSValueConst promise)
@@ -52889,7 +52916,7 @@ static void fulfill_or_reject_promise(JSContext *ctx, JSValueConst promise,
         args[2] = rd->handler;
         args[3] = js_bool(is_reject);
         args[4] = value;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
+        enqueue_job(ctx, promise_reaction_job, 5, args, rd->token);
         list_del(&rd->link);
         promise_reaction_data_free(ctx->rt, rd);
     }
@@ -53662,6 +53689,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         if (!JS_IsFunction(ctx, handler))
             handler = JS_UNDEFINED;
         rd->handler = js_dup(handler);
+        rd->token = ctx->rt->job_context_token;
         rd_array[i] = rd;
     }
 
@@ -53683,7 +53711,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         args[2] = rd->handler;
         args[3] = js_bool(i);
         args[4] = s->promise_result;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
+        enqueue_job(ctx, promise_reaction_job, 5, args, rd->token);
         for(i = 0; i < 2; i++)
             promise_reaction_data_free(ctx->rt, rd_array[i]);
     }

@@ -1103,6 +1103,49 @@ static void new_symbol(void)
     JS_FreeRuntime(rt);
 }
 
+static JSValue read_job_token(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    uint64_t high, low;
+    JS_GetJobContextToken(JS_GetRuntime(ctx), &high, &low);
+    assert(high == 0x123456789abcdef0ULL);
+    return JS_NewUint32(ctx, (uint32_t)low);
+}
+
+static void job_context_token(void)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt), *job_ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "token", JS_NewCFunction(ctx, read_job_token, "token", 0));
+    JS_FreeValue(ctx, global);
+    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 1);
+    JSValue ret = eval(ctx, "var complete, fail, seen = [];"
+                       "var p = new Promise(r => complete = r);"
+                       "var bad = new Promise((_, r) => fail = r);"
+                       "async function run() { await p; seen.push(token()); }"
+                       "run();");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 2);
+    ret = eval(ctx, "run(); (async () => { try { await bad; }"
+                    "catch { seen.push(token()); } })();");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 3);
+    ret = eval(ctx, "complete(); fail(); queueMicrotask(() => seen.push(token()));");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 4);
+    while (JS_IsJobPending(rt))
+        assert(JS_ExecutePendingJob(rt, &job_ctx) == 1);
+    ret = eval(ctx, "seen.join(',') === '1,2,2,3' && token() === 4");
+    assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
+    JS_FreeValue(ctx, ret);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
 int main(void)
 {
     cfunctions();
@@ -1117,6 +1160,7 @@ int main(void)
     utf16_string();
     weak_map_gc_check();
     promise_hook();
+    job_context_token();
     dump_memory_usage();
     new_errors();
     global_object_prototype();

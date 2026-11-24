@@ -1209,6 +1209,11 @@ typedef JSValue JSJobFunc(JSContext *ctx, int argc, JSValueConst *argv);
 JS_EXTERN int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
                             int argc, JSValueConst *argv);
 
+/* Opaque host token, initially zero. Jobs inherit it at enqueue time;
+   Promise reactions (including await) inherit it at registration time. */
+JS_EXTERN void JS_SetJobContextToken(JSRuntime *rt, uint64_t high, uint64_t low);
+JS_EXTERN void JS_GetJobContextToken(JSRuntime *rt, uint64_t *high, uint64_t *low);
+
 JS_EXTERN bool JS_IsJobPending(JSRuntime *rt);
 JS_EXTERN JSContext *JS_GetPendingJobContext(JSRuntime *rt);
 JS_EXTERN int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx);
