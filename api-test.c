@@ -1103,61 +1103,177 @@ static void new_symbol(void)
     JS_FreeRuntime(rt);
 }
 
-static JSValue get_embedder_data(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv)
+static JSValue call_method(JSContext *ctx, JSValueConst receiver, const char *name,
+                           int argc, JSValueConst *argv)
 {
-    return JS_GetContinuationPreservedEmbedderData(JS_GetRuntime(ctx));
+    JSValue method = JS_GetPropertyStr(ctx, receiver, name);
+    JSValue result = JS_Call(ctx, method, receiver, argc, argv);
+    JS_FreeValue(ctx, method);
+    assert(!JS_IsException(result));
+    return result;
 }
 
-static JSValue set_embedder_data(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv)
+static void assert_embedder_data(JSContext *ctx, JSValueConst expected)
 {
-    JS_SetContinuationPreservedEmbedderData(JS_GetRuntime(ctx), argc ? argv[0] : JS_UNDEFINED);
+    JSValue actual = JS_GetContinuationPreservedEmbedderData(JS_GetRuntime(ctx));
+    assert(JS_IsStrictEqual(ctx, actual, expected));
+    JS_FreeValue(ctx, actual);
+}
+
+static JSValue throw_from_job(JSContext *ctx, int argc, JSValueConst *argv)
+{
+    assert_embedder_data(ctx, JS_NewInt32(ctx, 42));
+    JS_SetContinuationPreservedEmbedderData(JS_GetRuntime(ctx), JS_NULL);
+    return JS_Throw(ctx, JS_NewInt32(ctx, 7));
+}
+
+static JSValue enqueue_nested_job(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    assert_embedder_data(ctx, JS_UNDEFINED);
+    JS_SetContinuationPreservedEmbedderData(JS_GetRuntime(ctx), JS_NewInt32(ctx, 42));
+    assert(JS_EnqueueJob(ctx, throw_from_job, 0, NULL) == 0);
     return JS_UNDEFINED;
 }
 
-static void continuation_preserved_embedder_data(void)
+static void continuation_embedder_data_jobs(void)
 {
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt), *job_ctx;
     JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "getData", JS_NewCFunction(ctx, get_embedder_data, "getData", 0));
-    JS_SetPropertyStr(ctx, global, "setData", JS_NewCFunction(ctx, set_embedder_data, "setData", 1));
-    JS_FreeValue(ctx, global);
+    JSValue callback = JS_NewCFunction(ctx, enqueue_nested_job, "enqueueNestedJob", 0);
+    JSValue outer = JS_NewObject(ctx);
 
-    JSValue ret = eval(ctx,
-        "const a = {}, b = {}, outer = {}, seen = [];"
-        "let complete, fail;"
-        "const p = new Promise(r => complete = r), bad = new Promise((_, r) => fail = r);"
-        "function check(expected) { seen.push(getData() === expected); }"
-        "async function run(expected) { await p; check(expected); }"
-        "check(undefined);"
-        "queueMicrotask(() => check(undefined));"
-        "setData(a); run(a);"
-        "setData(b); run(b);"
-        "(async () => { try { await bad; } catch { check(b); } })();"
-        "setData(42); Promise.resolve().then(() => check(42));"
-        "Promise.resolve({ then(r) { check(42); r(); } });"
-        "queueMicrotask(() => { setData(a); queueMicrotask(() => check(a)); });"
-        "setData(outer); complete(); fail();");
-    assert(!JS_IsException(ret));
-    JS_FreeValue(ctx, ret);
-    while (JS_IsJobPending(rt))
-        assert(JS_ExecutePendingJob(rt, &job_ctx) == 1);
-    ret = eval(ctx, "getData() === outer && seen.length === 8 && seen.every(Boolean)");
-    assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
-    JS_FreeValue(ctx, ret);
-
-    ret = eval(ctx, "setData(a); queueMicrotask(() => { setData(b); throw 7; }); setData(outer);");
-    assert(!JS_IsException(ret));
-    JS_FreeValue(ctx, ret);
+    assert_embedder_data(ctx, JS_UNDEFINED);
+    JS_FreeValue(ctx, call_method(ctx, global, "queueMicrotask", 1, &callback));
+    JS_SetContinuationPreservedEmbedderData(rt, outer);
+    assert(JS_ExecutePendingJob(rt, &job_ctx) == 1 && job_ctx == ctx);
+    assert_embedder_data(ctx, outer);
     assert(JS_ExecutePendingJob(rt, &job_ctx) == -1 && job_ctx == ctx);
-    ret = JS_GetException(ctx);
-    assert(JS_IsNumber(ret) && JS_VALUE_GET_INT(ret) == 7);
+    JSValue error = JS_GetException(ctx);
+    assert(JS_IsStrictEqual(ctx, error, JS_NewInt32(ctx, 7)));
+    assert_embedder_data(ctx, outer);
+    assert(!JS_IsJobPending(rt));
+
+    JS_FreeValue(ctx, error);
+    JS_FreeValue(ctx, outer);
+    JS_FreeValue(ctx, callback);
+    JS_FreeValue(ctx, global);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+static JSValue settle_thenable(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv, int reject)
+{
+    assert(argc == 2);
+    JSValue data = JS_GetContinuationPreservedEmbedderData(JS_GetRuntime(ctx));
+    JSValue result = JS_Call(ctx, argv[reject], JS_UNDEFINED, 1, &data);
+    JS_FreeValue(ctx, data);
+    return result;
+}
+
+static JSValue read_after_await(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    assert(argc >= 1 && JS_IsStrictEqual(ctx, argv[0], JS_NewInt32(ctx, 42)));
+    return JS_GetContinuationPreservedEmbedderData(JS_GetRuntime(ctx));
+}
+
+typedef struct {
+    JSValue promise, expected;
+    bool saw_rejection;
+} Awaiter;
+
+static void check_rejected_await(JSContext *ctx, JSValueConst promise,
+                                 JSValueConst reason, bool handled, void *opaque)
+{
+    Awaiter *awaiters = opaque;
+    if (handled)
+        return;
+    for (int i = 0; i < 2; i++) {
+        if (JS_IsStrictEqual(ctx, promise, awaiters[i].promise)) {
+            assert_embedder_data(ctx, awaiters[i].expected);
+            assert(JS_IsStrictEqual(ctx, reason, JS_NewInt32(ctx, 42)));
+            awaiters[i].saw_rejection = true;
+        }
+    }
+}
+
+static void continuation_embedder_data_await(bool reject)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt), *job_ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue array = JS_GetPropertyStr(ctx, global, "Array");
+    JSValue input = JS_NewObject(ctx), resolvers[2];
+    JSValue gate = JS_NewPromiseCapability(ctx, resolvers);
+    JSValue map = JS_NewCFunction(ctx, read_after_await, "readAfterAwait", 1);
+    JSValueConst args[] = { input, map };
+    Awaiter awaiters[2] = {0};
+
+    /* The built-in Array.fromAsync awaits input[0] before calling the mapper.
+       Both calls therefore suspend on the same pending promise. */
+    assert(JS_SetPropertyStr(ctx, input, "length", JS_NewInt32(ctx, 1)) >= 0);
+    assert(JS_SetPropertyUint32(ctx, input, 0, JS_DupValue(ctx, gate)) >= 0);
+    for (size_t i = 0; i < countof(awaiters); i++) {
+        awaiters[i].expected = JS_NewObject(ctx);
+        JS_SetContinuationPreservedEmbedderData(rt, awaiters[i].expected);
+        awaiters[i].promise = call_method(ctx, array, "fromAsync", 2, args);
+        assert(JS_PromiseState(ctx, awaiters[i].promise) == JS_PROMISE_PENDING);
+    }
+    JS_SetHostPromiseRejectionTracker(rt, check_rejected_await, awaiters);
+
+    /* The thenable's job captures 42, independently of both awaiters. */
+    JSValue thenable = JS_NewObject(ctx);
+    JSValue then = JS_NewCFunctionMagic(ctx, settle_thenable, "then", 2,
+                                        JS_CFUNC_generic_magic, reject);
+    assert(JS_SetPropertyStr(ctx, thenable, "then", then) >= 0);
+    JS_SetContinuationPreservedEmbedderData(rt, JS_NewInt32(ctx, 42));
+    JSValue ret = JS_Call(ctx, resolvers[0], JS_UNDEFINED, 1, &thenable);
+    assert(!JS_IsException(ret));
     JS_FreeValue(ctx, ret);
-    ret = eval(ctx, "getData() === outer");
-    assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
-    JS_FreeValue(ctx, ret);
+    JS_SetContinuationPreservedEmbedderData(rt, JS_UNDEFINED);
+    while (JS_IsJobPending(rt)) {
+        assert(JS_ExecutePendingJob(rt, &job_ctx) == 1 && job_ctx == ctx);
+        assert_embedder_data(ctx, JS_UNDEFINED);
+    }
+
+    JS_SetHostPromiseRejectionTracker(rt, NULL, NULL);
+    /* Register a reaction after the same gate has already settled. */
+    JS_SetContinuationPreservedEmbedderData(rt, awaiters[0].expected);
+    JSValue late = call_method(ctx, gate, reject ? "catch" : "then", 1, &map);
+    JS_SetContinuationPreservedEmbedderData(rt, JS_UNDEFINED);
+    assert(JS_ExecutePendingJob(rt, &job_ctx) == 1 && job_ctx == ctx);
+    assert(JS_PromiseState(ctx, late) == JS_PROMISE_FULFILLED);
+    JSValue captured = JS_PromiseResult(ctx, late);
+    assert(JS_IsStrictEqual(ctx, captured, awaiters[0].expected));
+    JS_FreeValue(ctx, captured);
+    JS_FreeValue(ctx, late);
+
+    for (size_t i = 0; i < countof(awaiters); i++) {
+        if (reject) {
+            assert(JS_PromiseState(ctx, awaiters[i].promise) == JS_PROMISE_REJECTED);
+            assert(awaiters[i].saw_rejection);
+        } else {
+            assert(JS_PromiseState(ctx, awaiters[i].promise) == JS_PROMISE_FULFILLED);
+            JSValue result = JS_PromiseResult(ctx, awaiters[i].promise);
+            JSValue first = JS_GetPropertyUint32(ctx, result, 0);
+            assert(JS_IsStrictEqual(ctx, first, awaiters[i].expected));
+            JS_FreeValue(ctx, first);
+            JS_FreeValue(ctx, result);
+        }
+        JS_FreeValue(ctx, awaiters[i].promise);
+        JS_FreeValue(ctx, awaiters[i].expected);
+    }
+    JS_FreeValue(ctx, thenable);
+    JS_FreeValue(ctx, gate);
+    JS_FreeValue(ctx, resolvers[0]);
+    JS_FreeValue(ctx, resolvers[1]);
+    JS_FreeValue(ctx, map);
+    JS_FreeValue(ctx, input);
+    JS_FreeValue(ctx, array);
+    JS_FreeValue(ctx, global);
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
 }
@@ -1180,8 +1296,11 @@ static void continuation_embedder_data_gc(void)
     JSValue data = JS_NewObjectClass(ctx, class_id);
     JS_SetContinuationPreservedEmbedderData(rt, data);
     /* data -> promise -> reactions -> data, with no external references. */
-    JSValue promise = eval(ctx, "(() => { let p = new Promise(() => {}); p.then(); return p; })()");
-    assert(!JS_IsException(promise));
+    JSValue resolvers[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolvers);
+    JS_FreeValue(ctx, call_method(ctx, promise, "then", 0, NULL));
+    JS_FreeValue(ctx, resolvers[0]);
+    JS_FreeValue(ctx, resolvers[1]);
     assert(JS_SetPropertyStr(ctx, data, "promise", promise) >= 0);
     JS_FreeValue(ctx, data);
     JS_RunGC(rt);
@@ -1193,9 +1312,7 @@ static void continuation_embedder_data_gc(void)
     data = JS_NewObjectClass(ctx, class_id);
     JS_SetContinuationPreservedEmbedderData(rt, data);
     JS_FreeValue(ctx, data);
-    JSValue ret = eval(ctx, "queueMicrotask(() => {})");
-    assert(!JS_IsException(ret));
-    JS_FreeValue(ctx, ret);
+    assert(JS_EnqueueJob(ctx, throw_from_job, 0, NULL) == 0);
     data = JS_NewObjectClass(ctx, class_id);
     JS_SetContinuationPreservedEmbedderData(rt, data);
     JS_FreeValue(ctx, data);
@@ -1220,7 +1337,9 @@ int main(void)
     utf16_string();
     weak_map_gc_check();
     promise_hook();
-    continuation_preserved_embedder_data();
+    continuation_embedder_data_jobs();
+    continuation_embedder_data_await(false);
+    continuation_embedder_data_await(true);
     continuation_embedder_data_gc();
     dump_memory_usage();
     new_errors();
