@@ -1103,6 +1103,131 @@ static void new_symbol(void)
     JS_FreeRuntime(rt);
 }
 
+static JSValue get_embedder_data(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    return JS_GetContinuationPreservedEmbedderData(JS_GetRuntime(ctx));
+}
+
+static JSValue set_embedder_data(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    JS_SetContinuationPreservedEmbedderData(JS_GetRuntime(ctx), argc ? argv[0] : JS_UNDEFINED);
+    return JS_UNDEFINED;
+}
+
+static void continuation_preserved_embedder_data(void)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt), *job_ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "getData", JS_NewCFunction(ctx, get_embedder_data, "getData", 0));
+    JS_SetPropertyStr(ctx, global, "setData", JS_NewCFunction(ctx, set_embedder_data, "setData", 1));
+    JS_FreeValue(ctx, global);
+
+    JSValue ret = eval(ctx,
+        "const a = {}, b = {}, outer = {}, seen = [];\n"
+        "let complete, fail;\n"
+        "const shared = new Promise(resolve => { complete = resolve; });\n"
+        "const bad = new Promise((_, reject) => { fail = reject; });\n"
+        "function check(expected) { seen.push(getData() === expected); }\n"
+        "async function run(expected) { await shared; check(expected); }\n"
+        "async function runRejected(expected) {\n"
+        "  try { await bad; } catch { check(expected); }\n"
+        "}\n"
+        "check(undefined);\n"
+        "queueMicrotask(() => check(undefined));\n"
+        "setData(a); run(a); runRejected(a);\n"
+        "setData(b); run(b); runRejected(b);\n"
+        "setData(42);\n"
+        "Promise.resolve().then(() => check(42));\n"
+        "Promise.reject().catch(() => check(42));\n"
+        "Promise.resolve({ then(resolve) { check(42); resolve(); } });\n"
+        "Promise.resolve({ then(_, reject) { check(42); reject(); } })\n"
+        "  .catch(() => check(42));\n"
+        "queueMicrotask(() => { setData(a); queueMicrotask(() => check(a)); });\n"
+        "setData(outer); complete(); fail();");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    while (JS_IsJobPending(rt)) {
+        assert(JS_ExecutePendingJob(rt, &job_ctx) == 1);
+        ret = eval(ctx, "getData() === outer");
+        assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
+        JS_FreeValue(ctx, ret);
+    }
+    ret = eval(ctx, "seen.length === 12 && seen.every(Boolean)");
+    assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
+    JS_FreeValue(ctx, ret);
+
+    ret = eval(ctx, "setData(a); queueMicrotask(() => { setData(b); throw 7; }); setData(outer);");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    assert(JS_ExecutePendingJob(rt, &job_ctx) == -1 && job_ctx == ctx);
+    ret = JS_GetException(ctx);
+    assert(JS_IsNumber(ret) && JS_VALUE_GET_INT(ret) == 7);
+    JS_FreeValue(ctx, ret);
+    ret = eval(ctx, "getData() === outer");
+    assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
+    JS_FreeValue(ctx, ret);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+static JSValue unexpected_job(JSContext *ctx, int argc, JSValueConst *argv)
+{
+    assert(false && "runtime teardown should discard this job");
+    return JS_UNDEFINED;
+}
+
+static int embedder_data_finalized;
+
+static void finalize_embedder_data(JSRuntime *rt, JSValueConst val)
+{
+    embedder_data_finalized++;
+}
+
+static void continuation_embedder_data_gc(void)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+    JSClassID class_id = 0;
+    JSClassDef def = { .class_name = "EmbedderData", .finalizer = finalize_embedder_data };
+    JS_NewClassID(rt, &class_id);
+    assert(JS_NewClass(rt, class_id, &def) == 0);
+    JSValue data = JS_NewObjectClass(ctx, class_id);
+    JS_SetContinuationPreservedEmbedderData(rt, data);
+    /* data -> promise -> reactions -> data, with no external references. */
+    JSValue resolvers[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolvers);
+    JSAtom then = JS_NewAtom(ctx, "then");
+    JSValue chained = JS_Invoke(ctx, promise, then, 0, NULL);
+    assert(!JS_IsException(chained));
+    JS_FreeAtom(ctx, then);
+    JS_FreeValue(ctx, chained);
+    JS_FreeValue(ctx, resolvers[0]);
+    JS_FreeValue(ctx, resolvers[1]);
+    assert(JS_SetPropertyStr(ctx, data, "promise", promise) >= 0);
+    JS_FreeValue(ctx, data);
+    JS_RunGC(rt);
+    assert(embedder_data_finalized == 0);
+    JS_SetContinuationPreservedEmbedderData(rt, JS_UNDEFINED);
+    JS_RunGC(rt);
+    assert(embedder_data_finalized == 1);
+
+    data = JS_NewObjectClass(ctx, class_id);
+    JS_SetContinuationPreservedEmbedderData(rt, data);
+    JS_FreeValue(ctx, data);
+    assert(JS_EnqueueJob(ctx, unexpected_job, 0, NULL) == 0);
+    data = JS_NewObjectClass(ctx, class_id);
+    JS_SetContinuationPreservedEmbedderData(rt, data);
+    JS_FreeValue(ctx, data);
+    JS_RunGC(rt);
+    assert(embedder_data_finalized == 1);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt); /* release both the undrained job and the active slot */
+    assert(embedder_data_finalized == 3);
+}
+
 int main(void)
 {
     cfunctions();
@@ -1117,6 +1242,8 @@ int main(void)
     utf16_string();
     weak_map_gc_check();
     promise_hook();
+    continuation_preserved_embedder_data();
+    continuation_embedder_data_gc();
     dump_memory_usage();
     new_errors();
     global_object_prototype();

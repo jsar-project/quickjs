@@ -1209,6 +1209,13 @@ typedef JSValue JSJobFunc(JSContext *ctx, int argc, JSValueConst *argv);
 JS_EXTERN int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
                             int argc, JSValueConst *argv);
 
+/* Runtime-local host data, initially JS_UNDEFINED. A job captures the current
+   value at enqueue time, a Promise reaction (including await) at registration.
+   Job execution installs the captured value and restores its caller's value
+   on return. Set retains a value from this runtime; Get returns an owned value. */
+JS_EXTERN void JS_SetContinuationPreservedEmbedderData(JSRuntime *rt, JSValueConst data);
+JS_EXTERN JSValue JS_GetContinuationPreservedEmbedderData(JSRuntime *rt);
+
 JS_EXTERN bool JS_IsJobPending(JSRuntime *rt);
 JS_EXTERN JSContext *JS_GetPendingJobContext(JSRuntime *rt);
 JS_EXTERN int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx);

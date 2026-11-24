@@ -93,7 +93,7 @@ jobs:
 
       - name: Setup Alpine
         if: ${{ matrix.config.arch != '' }}
-        uses: jirutka/setup-alpine@v1
+        uses: quickjs-ng/setup-alpine@29669499ee03620947b2fe8c1d705c4cc4db5103 # supports sudo-rs runners
         with:
           arch: ${{ matrix.config.arch }}
           packages: "build-base make cmake git"
@@ -832,11 +832,19 @@ jobs:
           }
           "LIB=$clangRuntimeDir;$env:LIB" >> $env:GITHUB_ENV
           $clangRuntimeDir >> $env:GITHUB_PATH
+          $asanDll = Get-ChildItem -LiteralPath $clangResourceDir -Recurse -File -Filter clang_rt.asan_dynamic-x86_64.dll | Select-Object -First 1
+          if (!$asanDll) { throw "Clang ASan DLL not found in: $clangResourceDir" }
+          "CLANG_ASAN_DLL=$($asanDll.FullName)" >> $env:GITHUB_ENV
       - name: Activate MSVC and Configure
         if: ${{ matrix.platform == 'windows-latest' }}
         env: ${{ matrix.mode.extra_envs }}
         run: |
           meson setup build-${{ matrix.flavor }} --buildtype=${{ matrix.flavor }} ${{ matrix.mode.args }} ${{ matrix.features.args }} --vsenv
+      - name: Stage LLVM ASan DLL beside the test executables
+        if: ${{ matrix.platform == 'windows-latest' && matrix.mode.name == 'clang-cl+sanitize' }}
+        run: |
+          # Meson puts MSVC's ASan DLL first on PATH. Load the DLL matching LLVM's import library.
+          Copy-Item -LiteralPath $env:CLANG_ASAN_DLL -Destination build-${{ matrix.flavor }}
       - name: Configuring
         if: ${{ matrix.platform != 'windows-latest' }}
         env: ${{ matrix.mode.extra_envs }}
