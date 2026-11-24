@@ -1103,47 +1103,107 @@ static void new_symbol(void)
     JS_FreeRuntime(rt);
 }
 
-static JSValue read_job_token(JSContext *ctx, JSValueConst this_val,
-                              int argc, JSValueConst *argv)
+static JSValue get_embedder_data(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
 {
-    uint64_t high, low;
-    JS_GetJobContextToken(JS_GetRuntime(ctx), &high, &low);
-    assert(high == 0x123456789abcdef0ULL);
-    return JS_NewUint32(ctx, (uint32_t)low);
+    return JS_GetContinuationPreservedEmbedderData(JS_GetRuntime(ctx));
 }
 
-static void job_context_token(void)
+static JSValue set_embedder_data(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    JS_SetContinuationPreservedEmbedderData(JS_GetRuntime(ctx), argc ? argv[0] : JS_UNDEFINED);
+    return JS_UNDEFINED;
+}
+
+static void continuation_preserved_embedder_data(void)
 {
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt), *job_ctx;
     JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "token", JS_NewCFunction(ctx, read_job_token, "token", 0));
+    JS_SetPropertyStr(ctx, global, "getData", JS_NewCFunction(ctx, get_embedder_data, "getData", 0));
+    JS_SetPropertyStr(ctx, global, "setData", JS_NewCFunction(ctx, set_embedder_data, "setData", 1));
     JS_FreeValue(ctx, global);
-    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 1);
-    JSValue ret = eval(ctx, "var complete, fail, seen = [];"
-                       "var p = new Promise(r => complete = r);"
-                       "var bad = new Promise((_, r) => fail = r);"
-                       "async function run() { await p; seen.push(token()); }"
-                       "run();");
+
+    JSValue ret = eval(ctx,
+        "const a = {}, b = {}, outer = {}, seen = [];"
+        "let complete, fail;"
+        "const p = new Promise(r => complete = r), bad = new Promise((_, r) => fail = r);"
+        "function check(expected) { seen.push(getData() === expected); }"
+        "async function run(expected) { await p; check(expected); }"
+        "check(undefined);"
+        "queueMicrotask(() => check(undefined));"
+        "setData(a); run(a);"
+        "setData(b); run(b);"
+        "(async () => { try { await bad; } catch { check(b); } })();"
+        "setData(42); Promise.resolve().then(() => check(42));"
+        "Promise.resolve({ then(r) { check(42); r(); } });"
+        "queueMicrotask(() => { setData(a); queueMicrotask(() => check(a)); });"
+        "setData(outer); complete(); fail();");
     assert(!JS_IsException(ret));
     JS_FreeValue(ctx, ret);
-    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 2);
-    ret = eval(ctx, "run(); (async () => { try { await bad; }"
-                    "catch { seen.push(token()); } })();");
-    assert(!JS_IsException(ret));
-    JS_FreeValue(ctx, ret);
-    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 3);
-    ret = eval(ctx, "complete(); fail(); queueMicrotask(() => seen.push(token()));");
-    assert(!JS_IsException(ret));
-    JS_FreeValue(ctx, ret);
-    JS_SetJobContextToken(rt, 0x123456789abcdef0ULL, 4);
     while (JS_IsJobPending(rt))
         assert(JS_ExecutePendingJob(rt, &job_ctx) == 1);
-    ret = eval(ctx, "seen.join(',') === '1,2,2,3' && token() === 4");
+    ret = eval(ctx, "getData() === outer && seen.length === 8 && seen.every(Boolean)");
+    assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
+    JS_FreeValue(ctx, ret);
+
+    ret = eval(ctx, "setData(a); queueMicrotask(() => { setData(b); throw 7; }); setData(outer);");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    assert(JS_ExecutePendingJob(rt, &job_ctx) == -1 && job_ctx == ctx);
+    ret = JS_GetException(ctx);
+    assert(JS_IsNumber(ret) && JS_VALUE_GET_INT(ret) == 7);
+    JS_FreeValue(ctx, ret);
+    ret = eval(ctx, "getData() === outer");
     assert(JS_IsBool(ret) && JS_VALUE_GET_BOOL(ret));
     JS_FreeValue(ctx, ret);
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
+}
+
+static int embedder_data_finalized;
+
+static void finalize_embedder_data(JSRuntime *rt, JSValueConst val)
+{
+    embedder_data_finalized++;
+}
+
+static void continuation_embedder_data_gc(void)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+    JSClassID class_id = 0;
+    JSClassDef def = { .class_name = "EmbedderData", .finalizer = finalize_embedder_data };
+    JS_NewClassID(rt, &class_id);
+    assert(JS_NewClass(rt, class_id, &def) == 0);
+    JSValue data = JS_NewObjectClass(ctx, class_id);
+    JS_SetContinuationPreservedEmbedderData(rt, data);
+    /* data -> promise -> reactions -> data, with no external references. */
+    JSValue promise = eval(ctx, "(() => { let p = new Promise(() => {}); p.then(); return p; })()");
+    assert(!JS_IsException(promise));
+    assert(JS_SetPropertyStr(ctx, data, "promise", promise) >= 0);
+    JS_FreeValue(ctx, data);
+    JS_RunGC(rt);
+    assert(embedder_data_finalized == 0);
+    JS_SetContinuationPreservedEmbedderData(rt, JS_UNDEFINED);
+    JS_RunGC(rt);
+    assert(embedder_data_finalized == 1);
+
+    data = JS_NewObjectClass(ctx, class_id);
+    JS_SetContinuationPreservedEmbedderData(rt, data);
+    JS_FreeValue(ctx, data);
+    JSValue ret = eval(ctx, "queueMicrotask(() => {})");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    data = JS_NewObjectClass(ctx, class_id);
+    JS_SetContinuationPreservedEmbedderData(rt, data);
+    JS_FreeValue(ctx, data);
+    JS_RunGC(rt);
+    assert(embedder_data_finalized == 1);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt); /* release both the undrained job and the active slot */
+    assert(embedder_data_finalized == 3);
 }
 
 int main(void)
@@ -1160,7 +1220,8 @@ int main(void)
     utf16_string();
     weak_map_gc_check();
     promise_hook();
-    job_context_token();
+    continuation_preserved_embedder_data();
+    continuation_embedder_data_gc();
     dump_memory_usage();
     new_errors();
     global_object_prototype();

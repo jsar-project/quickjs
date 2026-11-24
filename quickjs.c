@@ -273,10 +273,6 @@ typedef struct JSValueLink {
     JSValueConst value;
 } JSValueLink;
 
-typedef struct JSJobContextToken {
-    uint64_t high, low;
-} JSJobContextToken;
-
 struct JSRuntime {
     JSMallocFunctions mf;
     JSMallocState malloc_state;
@@ -333,7 +329,7 @@ struct JSRuntime {
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
 
-    JSJobContextToken job_context_token;
+    JSValue embedder_data; /* active continuation-preserved embedder data */
     struct list_head job_list; /* list of JSJobEntry.link */
 
     bool module_normalize_has_attr;
@@ -995,7 +991,7 @@ typedef struct JSJobEntry {
     struct list_head link;
     JSContext *ctx;
     JSJobFunc *job_func;
-    JSJobContextToken token;
+    JSValue embedder_data;
     int argc;
     JSValue argv[];
 } JSJobEntry;
@@ -1980,6 +1976,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     init_list_head(&rt->string_list);
 #endif
     init_list_head(&rt->job_list);
+    rt->embedder_data = JS_UNDEFINED;
 
     if (JS_InitAtoms(rt))
         goto fail;
@@ -2128,7 +2125,7 @@ void JS_SetSharedArrayBufferFunctions(JSRuntime *rt,
 
 /* return 0 if OK, < 0 if exception */
 static int enqueue_job(JSContext *ctx, JSJobFunc *job_func, int argc,
-                       JSValueConst *argv, JSJobContextToken token)
+                       JSValueConst *argv, JSValueConst embedder_data)
 {
     JSRuntime *rt = ctx->rt;
     JSJobEntry *e;
@@ -2141,7 +2138,7 @@ static int enqueue_job(JSContext *ctx, JSJobFunc *job_func, int argc,
         return -1;
     e->ctx = ctx;
     e->job_func = job_func;
-    e->token = token;
+    e->embedder_data = js_dup(embedder_data);
     e->argc = argc;
     for(i = 0; i < argc; i++) {
         e->argv[i] = js_dup(argv[i]);
@@ -2152,18 +2149,19 @@ static int enqueue_job(JSContext *ctx, JSJobFunc *job_func, int argc,
 
 int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func, int argc, JSValueConst *argv)
 {
-    return enqueue_job(ctx, job_func, argc, argv, ctx->rt->job_context_token);
+    return enqueue_job(ctx, job_func, argc, argv, ctx->rt->embedder_data);
 }
 
-void JS_SetJobContextToken(JSRuntime *rt, uint64_t high, uint64_t low)
+void JS_SetContinuationPreservedEmbedderData(JSRuntime *rt, JSValueConst data)
 {
-    rt->job_context_token = (JSJobContextToken){ high, low };
+    JSValue previous = rt->embedder_data;
+    rt->embedder_data = js_dup(data);
+    JS_FreeValueRT(rt, previous);
 }
 
-void JS_GetJobContextToken(JSRuntime *rt, uint64_t *high, uint64_t *low)
+JSValue JS_GetContinuationPreservedEmbedderData(JSRuntime *rt)
 {
-    *high = rt->job_context_token.high;
-    *low = rt->job_context_token.low;
+    return js_dup(rt->embedder_data);
 }
 
 bool JS_IsJobPending(JSRuntime *rt)
@@ -2197,10 +2195,12 @@ int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx)
     e = list_entry(rt->job_list.next, JSJobEntry, link);
     list_del(&e->link);
     ctx = e->ctx;
-    JSJobContextToken previous = rt->job_context_token;
-    rt->job_context_token = e->token;
+    JSValue previous = rt->embedder_data;
+    rt->embedder_data = e->embedder_data; /* transfer the queued reference */
     res = e->job_func(ctx, e->argc, vc(e->argv));
-    rt->job_context_token = previous;
+    JSValue completed = rt->embedder_data;
+    rt->embedder_data = previous;
+    JS_FreeValueRT(rt, completed);
     for(i = 0; i < e->argc; i++)
         JS_FreeValue(ctx, e->argv[i]);
     if (JS_IsException(res))
@@ -2303,10 +2303,12 @@ void JS_FreeRuntime(JSRuntime *rt)
     int i;
 
     rt->in_free = true;
+    JS_SetContinuationPreservedEmbedderData(rt, JS_UNDEFINED);
     JS_FreeValueRT(rt, rt->current_exception);
 
     list_for_each_safe(el, el1, &rt->job_list) {
         JSJobEntry *e = list_entry(el, JSJobEntry, link);
+        JS_FreeValueRT(rt, e->embedder_data);
         for(i = 0; i < e->argc; i++)
             JS_FreeValueRT(rt, e->argv[i]);
         js_free_rt(rt, e);
@@ -52768,7 +52770,7 @@ typedef struct JSPromiseReactionData {
     struct list_head link; /* not used in promise_reaction_job */
     JSValue resolving_funcs[2];
     JSValue handler;
-    JSJobContextToken token;
+    JSValue embedder_data;
 } JSPromiseReactionData;
 
 JSPromiseStateEnum JS_PromiseState(JSContext *ctx, JSValueConst promise)
@@ -52808,6 +52810,7 @@ static void promise_reaction_data_free(JSRuntime *rt,
     JS_FreeValueRT(rt, rd->resolving_funcs[0]);
     JS_FreeValueRT(rt, rd->resolving_funcs[1]);
     JS_FreeValueRT(rt, rd->handler);
+    JS_FreeValueRT(rt, rd->embedder_data);
     js_free_rt(rt, rd);
 }
 
@@ -52916,7 +52919,7 @@ static void fulfill_or_reject_promise(JSContext *ctx, JSValueConst promise,
         args[2] = rd->handler;
         args[3] = js_bool(is_reject);
         args[4] = value;
-        enqueue_job(ctx, promise_reaction_job, 5, args, rd->token);
+        enqueue_job(ctx, promise_reaction_job, 5, args, rd->embedder_data);
         list_del(&rd->link);
         promise_reaction_data_free(ctx->rt, rd);
     }
@@ -53124,6 +53127,7 @@ static void js_promise_mark(JSRuntime *rt, JSValueConst val,
             JS_MarkValue(rt, rd->resolving_funcs[0], mark_func);
             JS_MarkValue(rt, rd->resolving_funcs[1], mark_func);
             JS_MarkValue(rt, rd->handler, mark_func);
+            JS_MarkValue(rt, rd->embedder_data, mark_func);
         }
     }
     JS_MarkValue(rt, s->promise_result, mark_func);
@@ -53689,7 +53693,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         if (!JS_IsFunction(ctx, handler))
             handler = JS_UNDEFINED;
         rd->handler = js_dup(handler);
-        rd->token = ctx->rt->job_context_token;
+        rd->embedder_data = js_dup(ctx->rt->embedder_data);
         rd_array[i] = rd;
     }
 
@@ -53711,7 +53715,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         args[2] = rd->handler;
         args[3] = js_bool(i);
         args[4] = s->promise_result;
-        enqueue_job(ctx, promise_reaction_job, 5, args, rd->token);
+        enqueue_job(ctx, promise_reaction_job, 5, args, rd->embedder_data);
         for(i = 0; i < 2; i++)
             promise_reaction_data_free(ctx->rt, rd_array[i]);
     }
