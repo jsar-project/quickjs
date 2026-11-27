@@ -17306,6 +17306,7 @@ static void close_lexical_var(JSContext *ctx, JSFunctionBytecode *b,
 
 #define JS_CALL_FLAG_COPY_ARGV   (1 << 1)
 #define JS_CALL_FLAG_GENERATOR   (1 << 2)
+#define JS_CALL_FLAG_SYNC_MODULE_BODY (1 << 3)
 
 static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
                                   JSValueConst this_obj,
@@ -20825,6 +20826,8 @@ static JSValue js_async_function_resolve_call(JSContext *ctx,
     return JS_UNDEFINED;
 }
 
+static void js_mark_sync_module_body_promise(JSValueConst promise);
+
 static JSValue js_async_function_call(JSContext *ctx, JSValueConst func_obj,
                                       JSValueConst this_obj,
                                       int argc, JSValueConst *argv, int flags)
@@ -20844,6 +20847,8 @@ static JSValue js_async_function_call(JSContext *ctx, JSValueConst func_obj,
     promise = JS_NewPromiseCapability(ctx, s->resolving_funcs);
     if (JS_IsException(promise))
         goto fail;
+    if (flags & JS_CALL_FLAG_SYNC_MODULE_BODY)
+        js_mark_sync_module_body_promise(promise);
 
     if (async_func_init(ctx, &s->func_state, func_obj, this_obj, argc, argv)) {
     fail:
@@ -30817,7 +30822,8 @@ static int js_execute_sync_module(JSContext *ctx, JSModuleDef *m,
         JSValue promise;
         JSPromiseStateEnum state;
 
-        promise = js_async_function_call(ctx, m->func_obj, JS_UNDEFINED, 0, NULL, 0);
+        promise = js_async_function_call(ctx, m->func_obj, JS_UNDEFINED, 0, NULL,
+                                         JS_CALL_FLAG_SYNC_MODULE_BODY);
         if (JS_IsException(promise))
             goto fail;
         state = JS_PromiseState(ctx, promise);
@@ -52753,6 +52759,7 @@ typedef struct JSPromiseData {
     /* 0=fulfill, 1=reject, list of JSPromiseReactionData.link */
     struct list_head promise_reactions[2];
     bool is_handled; /* Note: only useful to debug */
+    bool is_sync_module_body;
     JSValue promise_result;
 } JSPromiseData;
 
@@ -52794,6 +52801,18 @@ bool JS_IsPromise(JSValueConst val)
     if (JS_VALUE_GET_TAG(val) != JS_TAG_OBJECT)
         return false;
     return JS_VALUE_GET_OBJ(val)->class_id == JS_CLASS_PROMISE;
+}
+
+bool JS_IsSyncModuleBodyPromise(JSValueConst promise)
+{
+    JSPromiseData *s = JS_GetOpaque(promise, JS_CLASS_PROMISE);
+    return s && s->is_sync_module_body;
+}
+
+static void js_mark_sync_module_body_promise(JSValueConst promise)
+{
+    JSPromiseData *s = JS_GetOpaque(promise, JS_CLASS_PROMISE);
+    s->is_sync_module_body = true;
 }
 
 JSValue JS_NewSettledPromise(JSContext *ctx, bool is_reject, JSValueConst value)
