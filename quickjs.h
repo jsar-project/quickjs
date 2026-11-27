@@ -1118,10 +1118,6 @@ JS_EXTERN JSPromiseStateEnum JS_PromiseState(JSContext *ctx,
                                              JSValueConst promise);
 JS_EXTERN JSValue JS_PromiseResult(JSContext *ctx, JSValueConst promise);
 JS_EXTERN bool JS_IsPromise(JSValueConst val);
-/* In a rejection tracker, identifies the private Promise used to evaluate a
-   synchronous module body. The engine consumes its result and propagates it
-   to a separate evaluation Promise. This query does not change handling. */
-JS_EXTERN bool JS_IsSyncModuleBodyPromise(JSValueConst promise);
 JS_EXTERN JSValue JS_NewSettledPromise(JSContext *ctx, bool is_reject, JSValueConst value);
 
 JS_EXTERN JSValue JS_NewSymbol(JSContext *ctx, const char *description, bool is_global);

@@ -20826,7 +20826,7 @@ static JSValue js_async_function_resolve_call(JSContext *ctx,
     return JS_UNDEFINED;
 }
 
-static void js_mark_sync_module_body_promise(JSValueConst promise);
+static void js_mark_pending_promise_handled(JSValueConst promise);
 
 static JSValue js_async_function_call(JSContext *ctx, JSValueConst func_obj,
                                       JSValueConst this_obj,
@@ -20847,8 +20847,10 @@ static JSValue js_async_function_call(JSContext *ctx, JSValueConst func_obj,
     promise = JS_NewPromiseCapability(ctx, s->resolving_funcs);
     if (JS_IsException(promise))
         goto fail;
-    if (flags & JS_CALL_FLAG_SYNC_MODULE_BODY)
-        js_mark_sync_module_body_promise(promise);
+    if (flags & JS_CALL_FLAG_SYNC_MODULE_BODY) {
+        /* The sync module evaluator reads and propagates the rejection. */
+        js_mark_pending_promise_handled(promise);
+    }
 
     if (async_func_init(ctx, &s->func_state, func_obj, this_obj, argc, argv)) {
     fail:
@@ -52758,8 +52760,7 @@ typedef struct JSPromiseData {
     JSPromiseStateEnum promise_state;
     /* 0=fulfill, 1=reject, list of JSPromiseReactionData.link */
     struct list_head promise_reactions[2];
-    bool is_handled; /* Note: only useful to debug */
-    bool is_sync_module_body;
+    bool is_handled; /* Suppress unhandled rejection notifications. */
     JSValue promise_result;
 } JSPromiseData;
 
@@ -52803,16 +52804,11 @@ bool JS_IsPromise(JSValueConst val)
     return JS_VALUE_GET_OBJ(val)->class_id == JS_CLASS_PROMISE;
 }
 
-bool JS_IsSyncModuleBodyPromise(JSValueConst promise)
+static void js_mark_pending_promise_handled(JSValueConst promise)
 {
     JSPromiseData *s = JS_GetOpaque(promise, JS_CLASS_PROMISE);
-    return s && s->is_sync_module_body;
-}
-
-static void js_mark_sync_module_body_promise(JSValueConst promise)
-{
-    JSPromiseData *s = JS_GetOpaque(promise, JS_CLASS_PROMISE);
-    s->is_sync_module_body = true;
+    assert(s && s->promise_state == JS_PROMISE_PENDING);
+    s->is_handled = true;
 }
 
 JSValue JS_NewSettledPromise(JSContext *ctx, bool is_reject, JSValueConst value)
