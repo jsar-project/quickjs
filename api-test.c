@@ -1228,6 +1228,47 @@ static void continuation_embedder_data_gc(void)
     assert(embedder_data_finalized == 3);
 }
 
+typedef struct ModuleRejections {
+    JSValue promises[2];
+    size_t count;
+} ModuleRejections;
+
+static void track_module_rejection(JSContext *ctx, JSValueConst promise,
+                                   JSValueConst reason, bool handled, void *opaque)
+{
+    ModuleRejections *rejections = opaque;
+    if (!handled) {
+        assert(rejections->count < countof(rejections->promises));
+        rejections->promises[rejections->count++] = JS_DupValue(ctx, promise);
+    }
+}
+
+static void sync_module_rejection_tracking(void)
+{
+    static const char source[] =
+        "const reason = new Error('shared'); "
+        "globalThis.guestRejection = Promise.reject(reason); "
+        "throw reason;";
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+    ModuleRejections rejections = { 0 };
+    JS_SetHostPromiseRejectionTracker(rt, track_module_rejection, &rejections);
+
+    JSValue module = JS_Eval(ctx, source, strlen(source), "body.mjs", JS_EVAL_TYPE_MODULE);
+    JSValue guest = eval(ctx, "guestRejection");
+    assert(JS_PromiseState(ctx, module) == JS_PROMISE_REJECTED);
+    assert(rejections.count == 2);
+    assert(JS_IsStrictEqual(ctx, guest, rejections.promises[0]));
+    assert(JS_IsStrictEqual(ctx, module, rejections.promises[1]));
+
+    JS_FreeValue(ctx, guest);
+    JS_FreeValue(ctx, module);
+    for (size_t i = 0; i < rejections.count; i++)
+        JS_FreeValue(ctx, rejections.promises[i]);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
 int main(void)
 {
     cfunctions();
@@ -1242,6 +1283,7 @@ int main(void)
     utf16_string();
     weak_map_gc_check();
     promise_hook();
+    sync_module_rejection_tracking();
     continuation_preserved_embedder_data();
     continuation_embedder_data_gc();
     dump_memory_usage();
